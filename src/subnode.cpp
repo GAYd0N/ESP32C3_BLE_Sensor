@@ -8,19 +8,21 @@
 
 #define DHTPIN 10
 #define DHTTYPE DHT22
+#define LED 0
 
 BLEServer *pServer;
 BLEService *pService;
 BLECharacteristic *pTxCharacteristic; // 主发子收
 BLECharacteristic *pRxCharacteristic; // 子发主收
 
-
 DHT DHTSensor(DHTPIN, DHTTYPE);
+
+String message;
 
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
-
+SensorData Data;
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -42,7 +44,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         for (int i = 0; i < value.length(); i++)
           Serial.print(value[i]);
         Serial.println();
-        
+
         // 模拟处理消息后回复
         if (deviceConnected) {
           String response = "Slave response @ " + String(millis()/1000);
@@ -57,7 +59,9 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
   Serial.println("子节点启动...");
-  
+
+  pinMode(0, OUTPUT);
+
   // 设备名称带序号区分
   String deviceName = SLAVE_DEVICE_PREFIX + String(ESP.getEfuseMac() & 0xFFFF, HEX);
   BLEDevice::init(deviceName.c_str());
@@ -109,6 +113,12 @@ void loop() {
     oldDeviceConnected = deviceConnected;
   }
 
+  if (Data.isHeating)
+    digitalWrite(LED, HIGH);
+  else
+    digitalWrite(LED, LOW);
+
+
   delay(1800);
 
   float t = DHTSensor.readTemperature();
@@ -116,18 +126,20 @@ void loop() {
 
   if (isnan(h) || isnan(t)) {
       Serial.println(F("Failed to read from DHT sensor!"));
-      return;
+      h = -1;
+      t = -1;
   }
+  Data.humidity = h;
+  Data.temperature = t;
+
   Serial.print(F("Humidity: "));
   Serial.print(h);
   Serial.print(F("%  Temperature: "));
   Serial.print(t);
-  Serial.print(F("°C "));
+  Serial.println(F("°C"));
 
-  String message = "TEMP:" + String(t) + "\nHumidity:" + String(h);
-  
-  pRxCharacteristic->setValue(message.c_str()); 
+  pRxCharacteristic->setValue((uint8_t*)&Data, sizeof(Data));
   pRxCharacteristic->notify();
-  
+
 }
 #endif
