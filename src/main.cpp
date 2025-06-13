@@ -1,6 +1,6 @@
 #include "common_defs.h"
 #ifdef IS_MASTER
-#include <Arduino.h>
+// #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -13,8 +13,8 @@ struct ClientDevice {
   uint16_t connId = 0;
   bool connected = false;
   SensorData Data;
-  JsonDocument receivedJson;
-  String receivedStr;
+  DynamicJsonDocument receivedJson{512};
+  char receivedStr[512];
 };
 BLECharacteristic *pTxCharacteristic;
 BLECharacteristic *pRxCharacteristic;
@@ -58,7 +58,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
           if (client.connected && client.connId == param->connect.conn_id) {
             client.connected = false;
             client.connId = 0;
-            client.receivedStr.clear();
+            memset(client.receivedStr, 0, sizeof(client.receivedStr));
             client.Data.heater = false;
             client.Data.humidity = 0;
             client.Data.temperature = 0;
@@ -76,7 +76,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
         Serial.println("重启广播");
     }
 };
-
+bool endsWithNL(const char* str) {
+    unsigned int len = strlen(str);
+    return (len > 0) && (str[len - 1] == '\n');
+}
 // 接收数据回调类
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t* param) {
@@ -86,20 +89,21 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       if (!pData || !length)
         return;
 
-      Serial.printf("DATA: %S\t", String(pData, length));
-      Serial.printf("CONN_ID: %d\t", connId);
-      Serial.printf("length: %d\n", length);
+      // Serial.printf("DATA: %S\t", String(pData, length));
+      // Serial.printf("CONN_ID: %d\t", connId);
+      // Serial.printf("length: %d\n", length);
 
       for (auto &client : clients) {
         if (client.connected && client.connId == connId) {
-          client.receivedStr.concat(pData, length);
-
-          if(client.receivedStr.endsWith("\n")) {
+          size_t remainingSpace = sizeof(client.receivedStr) - strlen(client.receivedStr) - 1;
+          strncat(client.receivedStr, (char*)pData, remainingSpace);
+          if(endsWithNL(client.receivedStr)) {
             Serial.println("完整数据接收完成:");
-            Serial.println(client.receivedStr.c_str());
-            if(client.receivedStr.length() < 3 || !client.receivedStr.startsWith("{") || !client.receivedStr.endsWith("}\n")) {
+            // Serial.println(client.receivedStr.c_str());
+            String jsonStr(client.receivedStr);
+            if(!jsonStr.startsWith("{") || !jsonStr.endsWith("}\n")) {
               Serial.println("错误: 数据格式不符合JSON要求");
-              client.receivedStr.clear();
+              memset(client.receivedStr, 0, sizeof(client.receivedStr));
               return;
             }
           }
@@ -120,15 +124,15 @@ class MyCallbacks: public BLECharacteristicCallbacks {
               if (error) {
                   Serial.printf("JSON 解析失败: %s\n", error.c_str());
               } else {
-                  Serial.printf("Received JSON from %d: %s\n", connId, client.receivedStr.c_str());
+                  // Serial.printf("Received JSON from %d: %s\n", connId, client.receivedStr.c_str());
                   String name = client.receivedJson["name"];
                   client.Data.temperature = client.receivedJson["temperature"];
                   client.Data.humidity = client.receivedJson["humidity"];
                   client.Data.tempThreshold = client.receivedJson["tempThreshold"];
                   client.Data.heater = client.receivedJson["heater"];
-                  Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, I: %s\n", name.c_str(), 
-                    client.Data.temperature, client.Data.humidity, client.Data.heater, client.Data.heater);
-                  client.receivedStr.clear();
+                  Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, HEATER: %d\n", 
+                    name.c_str(), client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, (client.Data.heater ? 1 : 0));
+                  memset(client.receivedStr, 0, sizeof(client.receivedStr));
               }
               break;
           }
@@ -152,20 +156,23 @@ void sendLargeData(BLECharacteristic* pChar, const std::string& data) {
 }
 
 void notifyAllClients(JsonDocument& jsonDoc) {
-    if (!connectedDevices)
-      return;
-    std::string jsonStr;
-    serializeJson(jsonDoc, jsonStr);
-    if (jsonStr.length() < DEFAULT_MTU)
-    {
-      pTxCharacteristic->setValue(jsonStr + "\n");
-      pTxCharacteristic->notify();
-      Serial.printf("Sent JSON: %s\n", jsonStr.c_str());
-    }
-    else 
-    {
-      sendLargeData(pTxCharacteristic, jsonStr);
-    }
+  static bool isRunning = false;
+  if (!connectedDevices || isRunning)
+    return;
+  isRunning = true;
+  std::string jsonStr;
+  serializeJson(jsonDoc, jsonStr);
+  if (jsonStr.length() < DEFAULT_MTU)
+  {
+    pTxCharacteristic->setValue(jsonStr + "\n");
+    pTxCharacteristic->notify();
+    Serial.printf("Sent JSON: %s\n", jsonStr.c_str());
+  }
+  else 
+  {
+    sendLargeData(pTxCharacteristic, jsonStr);
+  }
+  isRunning = false;
 }
 
 void SendCommandJson() {
@@ -227,11 +234,11 @@ void handleSerialCommands() {
       Serial.println("加热器自动模式");
     }
     else if (command == "STATUS") {
-      for (auto &client : clients) {
-        if (!client.connected)
+      for (size_t i = 0; i < MAX_SLAVES; i++) {
+        if (!clients[i].connected)
           continue;
         Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f%, 阈值: %.1f, 加热: %s\n",
-        client.connId, client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, client.Data.heater ? "开启" : "关闭");
+        clients[i].connId, clients[i].Data.temperature, clients[i].Data.humidity, clients[i].Data.tempThreshold, clients[i].Data.heater ? "开启" : "关闭");
       }
       Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride);
     }
@@ -282,7 +289,10 @@ void setup() {
   pAdvertising->setMinInterval(0x20); // 建议设置合理的广播间隔
   pAdvertising->setMaxInterval(0x40);
   pAdvertising->setMinPreferred(0x20);
-
+  
+  for (auto &client : clients) {
+    client.connected = false;
+  }
   BLEDevice::startAdvertising();
   Serial.println("等待客户端连接...");
 }

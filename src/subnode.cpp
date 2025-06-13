@@ -237,7 +237,7 @@ void loop() {
   }
   Data.humidity = h;
   Data.temperature = t;
-  if (!heaterOverride) {
+  if (!heaterOverride && t != -1) {
     setHeaterStatus(Data.tempThreshold > t);
   }
   else {
