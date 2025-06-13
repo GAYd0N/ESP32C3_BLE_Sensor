@@ -19,15 +19,17 @@ BLEAdvertising *pAdvertising;
 BLEServer *pServer;
 BLEService *pService;
 ClientDevice* clients[3];
+CommandData CData;
+uint32_t connectedDevices = 0;
 
-float tempThreshold = 25.0;
-bool isAdvertising = false;
-int connectedDevices = 0;
 // 服务器回调类
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
-        if (param == nullptr || connectedDevices >= MAX_SLAVES) return;
         uint16_t connId = param->connect.conn_id;
+        if (connectedDevices >= MAX_SLAVES) {
+          pServer->disconnect(connId);
+          return;
+        }
         for (auto client : clients) {
           if (client == nullptr)
             client = new ClientDevice;
@@ -36,12 +38,15 @@ class MyServerCallbacks: public BLEServerCallbacks {
           }
           client->connId = connId;
           client->connected = true;
+          break;
         }
+
         connectedDevices++;
-        Serial.printf("客户端已连接");
+        Serial.printf("客户端已连接ID: ");
         Serial.println(connId);
         Serial.print("当前连接客户端数量: ");
         Serial.println(connectedDevices);
+        BLEDevice::startAdvertising();
     };
 
     void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
@@ -49,8 +54,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
         for (auto client : clients) {
           if (client == nullptr)
             continue;
-          if (client->connected && client->connId == pServer->getConnId()) {
+          if (client->connected && client->connId == param->connect.conn_id) {
+            memset(client, 0, sizeof(client));
             delete client;
+            client = nullptr;
             break;
           }
         }
@@ -59,6 +66,9 @@ class MyServerCallbacks: public BLEServerCallbacks {
         Serial.println(param->connect.conn_id);
         Serial.print("剩余连接客户端数量: ");
         Serial.println(connectedDevices);
+
+        BLEDevice::startAdvertising();
+        Serial.println("重启广播");
     }
 };
 
@@ -68,22 +78,31 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       uint16_t connId = param->connect.conn_id;
       uint8_t* data = param->write.value;
       uint16_t length = param->write.len;
-      SensorData* SData = reinterpret_cast<SensorData*>(data);
 
       for (auto client : clients) {
         if (client->connected && client->connId == connId) {
-          if (SData == nullptr || sizeof(SData) < sizeof(SensorData)) {
-              // 处理数据不足或空指针情况
+          SensorData* SData = reinterpret_cast<SensorData*>(data);
+          if (SData == nullptr || length != sizeof(SensorData)) {
               continue;
           }
-          Serial.printf("T: %.2f, H: %.2f, I: %d, connId: \n", SData->temperature, SData->humidity, SData->isHeating, connId);
+          Serial.printf("T: %.2f, H: %.2f, I: %d, connId: %d\n", SData->temperature, SData->humidity, SData->isHeating, connId);
           client->Data.temperature = SData->temperature;
           client->Data.humidity = SData->humidity;
           client->Data.isHeating = SData->isHeating;
         }
       }
+      Serial.printf("DATA: %S\t", data);
+      Serial.printf("CONN_ID: %d\t", connId);
+      Serial.printf("length: %d\n", length);
     }
 };
+void notifyAllClients(uint8_t* msg, size_t size) {
+  if (!connectedDevices)
+    return;
+  pTxCharacteristic->setValue(msg, size);
+  pTxCharacteristic->notify();
+}
+
 
 void handleSerialCommands() {
   if (Serial.available() > 0) {
@@ -102,22 +121,34 @@ void handleSerialCommands() {
               return;
           }
       }
+
       float newThreshold = numStr.toFloat();
 
       if (newThreshold >= 0 && newThreshold <= 50) { // 合理温度范围检查
-        tempThreshold = newThreshold;
-        Serial.printf("温度阈值已更新为: %.1f°C\n", tempThreshold);
+        CData.tempThreshold = newThreshold;
+        notifyAllClients(reinterpret_cast<uint8_t*>(&CData), sizeof(CData));
+        Serial.printf("温度阈值已更新为: %.1f°C\n", CData.tempThreshold);
       } 
       else {
         Serial.println("错误: 温度阈值必须在0-50°C之间");
       }
     }
     else if (command == "GET_THRESHOLD") {
-      Serial.printf("当前温度阈值: %.1f°C\n", tempThreshold);
+      Serial.printf("当前温度阈值: %.1f°C\n", CData.tempThreshold);
     } 
+    else if (command == "START_HEATER") {
+      CData.heater = true;
+      notifyAllClients(reinterpret_cast<uint8_t*>(&CData), sizeof(CData));
+      Serial.println("开启加热器");
+    }
+    else if (command == "STOP_HEATER") {
+      CData.heater = false;
+      notifyAllClients(reinterpret_cast<uint8_t*>(&CData), sizeof(CData));
+      Serial.println("关闭加热器");
+    }
     else if (command == "GET_STATUS") {
       float temp = 0;
-      for (int i = 0; i < connectedDevices; i++) {
+      for (uint32_t i = 0; i < connectedDevices; i++) {
         if (clients[i] == nullptr) {
           continue;
         }
@@ -125,13 +156,13 @@ void handleSerialCommands() {
         float h = clients[i]->Data.humidity;
         bool s = clients[i]->Data.isHeating;
         temp += t;
-        Serial.printf("当前状态 - 节点%d: %.1f°C, 湿度: %.1f%, 加热: %s\n",
+        Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f%, 加热: %s\n",
         i, clients[i]->Data.temperature, clients[i]->Data.humidity, clients[i]->Data.isHeating ? "开启" : "关闭");
       }
       if (connectedDevices) {
         temp = temp / connectedDevices;
       }
-      Serial.printf("温度平均值: %.1f, 阈值: %.1f", temp, tempThreshold);
+      Serial.printf("温度平均值: %.1f, 阈值: %.1f\n", temp, CData.tempThreshold);
 
     } 
     else if (command == "HELP") {
@@ -139,6 +170,8 @@ void handleSerialCommands() {
       Serial.println("SET_THRESHOLD XX.X - 设置温度阈值(0-50°C)");
       Serial.println("GET_THRESHOLD - 获取当前温度阈值");
       Serial.println("GET_STATUS - 获取当前系统状态");
+      Serial.println("START_HEATER - 开启加热器");
+      Serial.println("STOP_HEATER - 关闭加热器");
       Serial.println("HELP - 显示帮助信息");
     }
   }
@@ -149,7 +182,7 @@ void setup() {
   Serial.setTimeout(300);
   Serial.println("主节点启动...");
 
-  BLEDevice::init(MASTER_DEVICE_NAME);
+  BLEDevice::init(SERVER_DEVICE_NAME);
   // 创建BLE服务器
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
@@ -174,6 +207,10 @@ void setup() {
   pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
+  pAdvertising->setMinInterval(0x20); // 建议设置合理的广播间隔
+  pAdvertising->setMaxInterval(0x40);
+  pAdvertising->setMinPreferred(0x20);
+
   BLEDevice::startAdvertising();
   Serial.println("等待客户端连接...");
 }
@@ -183,12 +220,12 @@ void loop() {
 
   handleSerialCommands();
 
-  if (millis() - lastSendTime > 2000) {
-    lastSendTime = millis();
-    Serial.printf("%d, Test\n",millis());
+  uint32_t msTime = millis();
+  if (msTime - lastSendTime > 2000) {
+    lastSendTime = msTime;
+    Serial.printf("%d, Test\n",msTime);
   }
-  
-  // 处理其他任务
+
   delay(100);
 }
 

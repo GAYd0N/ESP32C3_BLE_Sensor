@@ -10,51 +10,114 @@
 #define DHTTYPE DHT22
 #define LED 0
 
-BLEServer *pServer;
-BLEService *pService;
-BLECharacteristic *pTxCharacteristic; // 主发子收
-BLECharacteristic *pRxCharacteristic; // 子发主收
-
 DHT DHTSensor(DHTPIN, DHTTYPE);
 
+String deviceName;
 String message;
 
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
-
 SensorData Data;
+CommandData CData;
+// 标志变量
+bool deviceFound = false;
+BLEAddress pServerAddress(SERVER_MAC);
+BLEClient *pClient = nullptr;
+BLEScan* pBLEScan = nullptr;
+BLERemoteService *pRemoteService = nullptr;
+BLERemoteCharacteristic *pTxRemoteCharacteristic = nullptr;
+BLERemoteCharacteristic *pRxRemoteCharacteristic = nullptr;
+BLEUUID serviceUUID(SERVICE_UUID);
+BLEUUID charUUID(RX_CHARACTERISTIC_UUID);
 
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-      Serial.println("主节点已连接");
-    };
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pClient) {
+    Serial.println("连接到服务器成功");
+  }
 
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-      Serial.println("主节点断开连接");
-    }
+  void onDisconnect(BLEClient* pClient) {
+    Serial.println("与服务器断开连接");
+  }
 };
 
-class MyCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string value = pCharacteristic->getValue();
-      if (value.length() > 0) {
-        Serial.print("收到主节点消息: ");
-        for (int i = 0; i < value.length(); i++)
-          Serial.print(value[i]);
-        Serial.println();
+void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify) {
+  Serial.printf("BLE Callback: pData=%p, length=%d, isNotify=%d\n", 
+              pData, length, isNotify); 
+  if (pData == nullptr || length != sizeof(CommandData)) {
+      return;
+  }
+  Serial.println("continue");
+  CommandData cmdData;
+  memcpy(&cmdData, pData, sizeof(CommandData));
+  Serial.printf("tempThreshold: %.2f, heater: %s, I: %d\n", cmdData.tempThreshold, cmdData.heater);
+  CData.heater = cmdData.heater;
+  CData.tempThreshold = cmdData.tempThreshold;
 
-        // 模拟处理消息后回复
-        if (deviceConnected) {
-          String response = "Slave response @ " + String(millis()/1000);
-          pRxCharacteristic->setValue(response.c_str());
-          pRxCharacteristic->notify();
-          Serial.println("已发送回复");
-        }
+  Serial.print("Notify callback for characteristic ");
+  Serial.print(pBLERemoteCharacteristic->getUUID().toString().c_str());
+  Serial.print(" of data length ");
+  Serial.println(length);
+  Serial.print("data: ");
+  Serial.write(pData, length);
+  Serial.println();
+}
+// 扫描回调类
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+      Serial.print("地址: ");
+      Serial.print(advertisedDevice.getAddress().toString().c_str());
+      Serial.printf(" %s\n", advertisedDevice.haveName() ? advertisedDevice.getName().c_str() : "Unknown");
+      if (advertisedDevice.haveName() && advertisedDevice.getName() == SERVER_DEVICE_NAME) {
+        Serial.println("已找到服务器");
+        advertisedDevice.getScan()->stop();
+        deviceFound = true;
       }
     }
 };
+
+
+
+void connectToServer() {
+    pClient->connect(pServerAddress);
+    Serial.printf("%d, 连接设备中, %s\n", millis(), pServerAddress.toString().c_str());
+    delay(500);
+
+    pRemoteService = pClient->getService(SERVICE_UUID);
+    delay(100);
+
+    if (pRemoteService != nullptr) {
+      Serial.println("Found our service!");
+    }
+    else {
+      Serial.println("Cant Find our service!");
+    }
+
+    pTxRemoteCharacteristic = pRemoteService->getCharacteristic(TX_CHARACTERISTIC_UUID);
+    pRxRemoteCharacteristic = pRemoteService->getCharacteristic(RX_CHARACTERISTIC_UUID);
+
+    delay(100);
+
+    if (pTxRemoteCharacteristic != nullptr && pRxRemoteCharacteristic != nullptr) {
+      Serial.println("Found our characteristic!");
+
+      // 读取特征值
+      if (pTxRemoteCharacteristic->canRead()) {
+        std::string value = pTxRemoteCharacteristic->readValue();
+        Serial.print("Received: ");
+        Serial.println(value.c_str());
+      }
+      if (pTxRemoteCharacteristic->canNotify()) {
+        pTxRemoteCharacteristic->registerForNotify(notifyCallback);
+      }
+
+      // 如果可以写入，也可以发送数据
+      if (pRxRemoteCharacteristic->canWrite()) {
+        String data = "Hello from " + deviceName;
+        pRxRemoteCharacteristic->writeValue((uint8_t*)data.c_str(), data.length());
+      }
+    }
+    else {
+      Serial.println("Cant Find our char!");
+    }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -63,56 +126,44 @@ void setup() {
   pinMode(0, OUTPUT);
 
   // 设备名称带序号区分
-  String deviceName = SLAVE_DEVICE_PREFIX + String(ESP.getEfuseMac() & 0xFFFF, HEX);
+  deviceName = CLIENT_DEVICE_PREFIX + String(ESP.getEfuseMac() & 0xFFFF, HEX);
+
   BLEDevice::init(deviceName.c_str());
-  
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-  
-  pService = pServer->createService(SERVICE_UUID);
-  
-  pTxCharacteristic = pService->createCharacteristic(
-                      TX_CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_WRITE |
-                      BLECharacteristic::PROPERTY_WRITE_NR
-                    );
-                      
-  pRxCharacteristic = pService->createCharacteristic(
-                      RX_CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ |
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
-  
-  pTxCharacteristic->setCallbacks(new MyCallbacks());
-  
-  pService->start();
-  
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);  // 有助于iPhone连接
-  pAdvertising->setMinPreferred(0x12);
-  BLEDevice::startAdvertising();
-  Serial.println("等待主节点连接...");
+  pClient = BLEDevice::createClient();
+  pClient->setClientCallbacks(new MyClientCallback());
 
-
+  // 开始扫描
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(1349);
+  pBLEScan->setWindow(449);
+  pBLEScan->start(30);
+  if (deviceFound) {
+    connectToServer();
+  }
   DHTSensor.begin();
-
 }
 
 void loop() {
-  // 处理断开重连
-  if (!deviceConnected && oldDeviceConnected) {
-    delay(500); // 给蓝牙堆栈一个处理时间
-    pServer->startAdvertising();
-    Serial.println("重新广播等待连接");
-    oldDeviceConnected = deviceConnected;
+  static uint32_t lastSendTime = 0;
+  uint32_t msTime = millis();
+  if (msTime - lastSendTime > 2000) {
+    lastSendTime = msTime;
+    // Serial.printf("%d, Test\n",msTime);
+    if (!pClient->isConnected())
+    {
+      // Serial.println("尝试重新连接服务器...");
+      // pBLEScan->start(30,true);
+      connectToServer();
+      Serial.printf("%d, 未连接服务器...\n", msTime);
+    }
   }
-  
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
-  }
-
+  // if (!deviceConnected && !oldDeviceConnected) {
+  //     delay(500); // 给BLE栈时间完成清理
+  //     // BLEDevice::getScan()->start(30);
+  //     oldDeviceConnected = deviceConnected;
+  // }
   if (Data.isHeating)
     digitalWrite(LED, HIGH);
   else
@@ -131,15 +182,18 @@ void loop() {
   }
   Data.humidity = h;
   Data.temperature = t;
-
+  
   Serial.print(F("Humidity: "));
   Serial.print(h);
   Serial.print(F("%  Temperature: "));
   Serial.print(t);
   Serial.println(F("°C"));
-
-  pRxCharacteristic->setValue((uint8_t*)&Data, sizeof(Data));
-  pRxCharacteristic->notify();
+  if (pClient->isConnected() && pRxRemoteCharacteristic != nullptr) {
+    pRxRemoteCharacteristic->writeValue((uint8_t*)(&Data), sizeof(Data));
+    Serial.println(deviceName + ": 数据发送成功");
+  } else {
+    Serial.println(deviceName + ": 无法发送数据 - 未连接或特征无效");
+  }
 
 }
 #endif
