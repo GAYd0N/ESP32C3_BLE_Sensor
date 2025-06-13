@@ -1,6 +1,6 @@
 #include "common_defs.h"
 #ifdef IS_SLAVE
-#include <Arduino.h>
+#include <c.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -40,8 +40,8 @@ void setHeaterStatus(bool status) {
   if (status != Data.heater) {
     Data.heater = status;
     digitalWrite(LED, (byte)Data.heater);
-    Serial.printf("已%s加热器\n", Data.heater ? "启动" : "关闭");
   }
+  Serial.printf("已%s加热器\n", status ? "启动" : "关闭");
 }
 
 void receiveDataChunks(uint8_t *pData, size_t length) {
@@ -67,9 +67,9 @@ void receiveDataChunks(uint8_t *pData, size_t length) {
     Serial.printf("JSON 解析失败: %s\n", error.c_str());
   } else {
     Data.tempThreshold = jsonDoc["tempThreshold"];
-    Data.heater = jsonDoc["heater"]; 
     heaterOverride = jsonDoc["heaterOverride"];
-    Serial.printf("温度阈值: %.1f, 加热: %s, 自动设置: %s\n", Data.tempThreshold, Data.heater ? "ON" : "OFF", heaterOverride);
+    Data.heater = jsonDoc["heater"];
+    Serial.printf("温度阈值: %.1f, 加热: %s, 自动设置: %s\n", Data.tempThreshold, Data.heater ? "ON" : "OFF", heaterOverride ? "OFF" : "ON");
   }
   jsonStr.clear();
 }
@@ -96,17 +96,22 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
 
 void sendLargeData(BLERemoteCharacteristic* pChar, const std::string& data) {
   const size_t chunkSize = DEFAULT_MTU;
+  static bool isSending = false;
+  //防止重复调用队列混乱
+  if (isSending)
+    return;
+  isSending = true;
   size_t length = data.length();
-  
   for(size_t i = 0; i < length; i += chunkSize) {
     size_t end = (i + chunkSize > length) ? length : i + chunkSize;
     std::string chunk = data.substr(i, end - i);
     pChar->writeValue(chunk, true);
     Serial.printf(chunk.c_str());
-    delay(10); // 给接收方处理时间
+    delay(20); // 给接收方处理时间
   }
   pChar->writeValue("\n", true);
   Serial.println("");
+  isSending = false;
 }
 
 
