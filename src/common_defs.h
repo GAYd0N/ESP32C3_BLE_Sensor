@@ -2,6 +2,8 @@
 #ifndef COMMON_DEFS_H
 #define COMMON_DEFS_H
 
+#define DEFAULT_MTU 20
+
 #define SERVER_MAC "50:78:7D:45:D8:62"
 
 // BLE服务UUID
@@ -17,13 +19,14 @@
 
 // 最大子节点数量
 #define MAX_SLAVES 3
-// #define IS_SLAVE 1
-#define IS_MASTER 1
+#define IS_SLAVE 1
+// #define IS_MASTER 1
 
 struct SensorData {
   float temperature;
   float humidity;
-  bool isHeating;
+  float tempThreshold = 25.0;
+  bool heater;
 };
 
 struct CommandData {

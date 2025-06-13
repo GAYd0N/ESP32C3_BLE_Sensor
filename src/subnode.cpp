@@ -1,6 +1,7 @@
 #include "common_defs.h"
 #ifdef IS_SLAVE
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -13,10 +14,9 @@
 DHT DHTSensor(DHTPIN, DHTTYPE);
 
 String deviceName;
-String message;
 
 SensorData Data;
-CommandData CData;
+
 // 标志变量
 bool deviceFound = false;
 BLEAddress pServerAddress(SERVER_MAC);
@@ -25,8 +25,6 @@ BLEScan* pBLEScan = nullptr;
 BLERemoteService *pRemoteService = nullptr;
 BLERemoteCharacteristic *pTxRemoteCharacteristic = nullptr;
 BLERemoteCharacteristic *pRxRemoteCharacteristic = nullptr;
-BLEUUID serviceUUID(SERVICE_UUID);
-BLEUUID charUUID(RX_CHARACTERISTIC_UUID);
 
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient* pClient) {
@@ -38,27 +36,50 @@ class MyClientCallback : public BLEClientCallbacks {
   }
 };
 
-void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify) {
-  Serial.printf("BLE Callback: pData=%p, length=%d, isNotify=%d\n", 
-              pData, length, isNotify); 
-  if (pData == nullptr || length != sizeof(CommandData)) {
-      return;
+void setHeaterStatus(bool status) {
+  if (status != Data.heater) {
+    Data.heater = status;
+    digitalWrite(LED, (byte)Data.heater);
+    Serial.printf("已%s加热器\n", Data.heater ? "启动" : "关闭");
   }
-  Serial.println("continue");
-  CommandData cmdData;
-  memcpy(&cmdData, pData, sizeof(CommandData));
-  Serial.printf("tempThreshold: %.2f, heater: %s, I: %d\n", cmdData.tempThreshold, cmdData.heater);
-  CData.heater = cmdData.heater;
-  CData.tempThreshold = cmdData.tempThreshold;
-
-  Serial.print("Notify callback for characteristic ");
-  Serial.print(pBLERemoteCharacteristic->getUUID().toString().c_str());
-  Serial.print(" of data length ");
-  Serial.println(length);
-  Serial.print("data: ");
-  Serial.write(pData, length);
-  Serial.println();
 }
+
+void receiveDataChunks(uint8_t *pData, size_t length) {
+  static String jsonStr;
+  if (pData == nullptr)
+      return;
+
+  jsonStr.concat(pData, length);
+
+  // 检查是否收到完整数据（需要应用层协议确定结束）
+  if(jsonStr.endsWith("\n")) {
+    Serial.println("完整数据接收完成:");
+    Serial.println(jsonStr.c_str());
+  }
+  else {
+    return;
+  }
+
+  JsonDocument jsonDoc;
+  DeserializationError error = deserializeJson(jsonDoc, jsonStr);
+  Serial.println(jsonStr.c_str());
+  if (error) {
+    Serial.printf("JSON 解析失败: %s\n", error.c_str());
+  } else {
+    Data.tempThreshold = jsonDoc["tempThreshold"]; // 25.5
+    Data.heater = jsonDoc["heater"]; // true
+    setHeaterStatus(Data.heater);
+    Serial.printf("温度阈值: %.1f, 加热: %s\n", Data.tempThreshold, Data.heater ? "ON" : "OFF");
+  }
+  jsonStr.clear();
+}
+
+void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify) {
+  // Serial.printf("BLE Callback: pData=%s, length=%d, isNotify=%d\n", 
+  //             pData, length, isNotify);
+  receiveDataChunks(pData, length);
+}
+
 // 扫描回调类
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
@@ -73,6 +94,19 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     }
 };
 
+void sendLargeData(BLERemoteCharacteristic* pChar, const std::string& data) {
+  const size_t chunkSize = DEFAULT_MTU;
+  size_t length = data.length();
+  
+  for(size_t i = 0; i < length; i += chunkSize) {
+    size_t end = (i + chunkSize > length) ? length : i + chunkSize;
+    std::string chunk = data.substr(i, end - i);
+    pChar->writeValue(chunk);
+    Serial.printf(chunk.c_str());
+    delay(10); // 给接收方处理时间
+  }
+  Serial.println("");
+}
 
 
 void connectToServer() {
@@ -110,13 +144,32 @@ void connectToServer() {
 
       // 如果可以写入，也可以发送数据
       if (pRxRemoteCharacteristic->canWrite()) {
-        String data = "Hello from " + deviceName;
-        pRxRemoteCharacteristic->writeValue((uint8_t*)data.c_str(), data.length());
+        std::string data(deviceName.c_str());
+        sendLargeData(pRxRemoteCharacteristic, data);
       }
     }
     else {
-      Serial.println("Cant Find our char!");
+      Serial.println("Cant Find our Characteristic!");
     }
+}
+
+
+void SendDataToServer() {
+  if (pClient->isConnected() && pRxRemoteCharacteristic != nullptr) {
+    std::string jsonStr;
+    JsonDocument jsonDoc;
+    jsonDoc["name"] = deviceName.c_str();
+    jsonDoc["temperature"] = Data.temperature;
+    jsonDoc["humidity"] = Data.humidity;
+    jsonDoc["tempThreshold"] = Data.tempThreshold;
+    jsonDoc["heater"] = Data.heater;
+
+    serializeJson(jsonDoc, jsonStr);
+    sendLargeData(pRxRemoteCharacteristic, jsonStr);
+    Serial.println(deviceName + ": 数据已发送");
+  } else {
+    Serial.println(deviceName + ": 无法发送数据 - 未连接或特征无效");
+  }
 }
 
 void setup() {
@@ -131,7 +184,6 @@ void setup() {
   BLEDevice::init(deviceName.c_str());
   pClient = BLEDevice::createClient();
   pClient->setClientCallbacks(new MyClientCallback());
-
   // 开始扫描
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
@@ -145,6 +197,7 @@ void setup() {
   DHTSensor.begin();
 }
 
+
 void loop() {
   static uint32_t lastSendTime = 0;
   uint32_t msTime = millis();
@@ -153,6 +206,7 @@ void loop() {
     // Serial.printf("%d, Test\n",msTime);
     if (!pClient->isConnected())
     {
+      delay(5);
       // Serial.println("尝试重新连接服务器...");
       // pBLEScan->start(30,true);
       connectToServer();
@@ -164,11 +218,6 @@ void loop() {
   //     // BLEDevice::getScan()->start(30);
   //     oldDeviceConnected = deviceConnected;
   // }
-  if (Data.isHeating)
-    digitalWrite(LED, HIGH);
-  else
-    digitalWrite(LED, LOW);
-
 
   delay(1800);
 
@@ -182,18 +231,22 @@ void loop() {
   }
   Data.humidity = h;
   Data.temperature = t;
+
+  if (Data.tempThreshold > t) {
+    setHeaterStatus(true);
+  }
+  else {
+    setHeaterStatus(false);
+  }
   
   Serial.print(F("Humidity: "));
   Serial.print(h);
   Serial.print(F("%  Temperature: "));
   Serial.print(t);
-  Serial.println(F("°C"));
-  if (pClient->isConnected() && pRxRemoteCharacteristic != nullptr) {
-    pRxRemoteCharacteristic->writeValue((uint8_t*)(&Data), sizeof(Data));
-    Serial.println(deviceName + ": 数据发送成功");
-  } else {
-    Serial.println(deviceName + ": 无法发送数据 - 未连接或特征无效");
-  }
+  Serial.print(F("°C"));
+  Serial.printf(" TempThreshold: %.1f", Data.tempThreshold);
+  Serial.printf(" Heater: %s\n", Data.heater ? "ON" : "OFF");
+  SendDataToServer();
 
 }
 #endif
