@@ -16,9 +16,9 @@ DHT DHTSensor(DHTPIN, DHTTYPE);
 String deviceName;
 
 SensorData Data;
-
-// 标志变量
+bool heaterOverride = false;
 bool deviceFound = false;
+
 BLEAddress pServerAddress(SERVER_MAC);
 BLEClient *pClient = nullptr;
 BLEScan* pBLEScan = nullptr;
@@ -66,10 +66,10 @@ void receiveDataChunks(uint8_t *pData, size_t length) {
   if (error) {
     Serial.printf("JSON 解析失败: %s\n", error.c_str());
   } else {
-    Data.tempThreshold = jsonDoc["tempThreshold"]; // 25.5
-    Data.heater = jsonDoc["heater"]; // true
-    setHeaterStatus(Data.heater);
-    Serial.printf("温度阈值: %.1f, 加热: %s\n", Data.tempThreshold, Data.heater ? "ON" : "OFF");
+    Data.tempThreshold = jsonDoc["tempThreshold"];
+    Data.heater = jsonDoc["heater"]; 
+    heaterOverride = jsonDoc["heaterOverride"];
+    Serial.printf("温度阈值: %.1f, 加热: %s, 自动设置: %s\n", Data.tempThreshold, Data.heater ? "ON" : "OFF", heaterOverride);
   }
   jsonStr.clear();
 }
@@ -101,10 +101,11 @@ void sendLargeData(BLERemoteCharacteristic* pChar, const std::string& data) {
   for(size_t i = 0; i < length; i += chunkSize) {
     size_t end = (i + chunkSize > length) ? length : i + chunkSize;
     std::string chunk = data.substr(i, end - i);
-    pChar->writeValue(chunk);
+    pChar->writeValue(chunk, true);
     Serial.printf(chunk.c_str());
     delay(10); // 给接收方处理时间
   }
+  pChar->writeValue("\n", true);
   Serial.println("");
 }
 
@@ -231,21 +232,21 @@ void loop() {
   }
   Data.humidity = h;
   Data.temperature = t;
-
-  if (Data.tempThreshold > t) {
-    setHeaterStatus(true);
+  if (!heaterOverride) {
+    setHeaterStatus(Data.tempThreshold > t);
   }
   else {
-    setHeaterStatus(false);
+    setHeaterStatus(Data.heater);
   }
-  
   Serial.print(F("Humidity: "));
   Serial.print(h);
   Serial.print(F("%  Temperature: "));
   Serial.print(t);
   Serial.print(F("°C"));
   Serial.printf(" TempThreshold: %.1f", Data.tempThreshold);
-  Serial.printf(" Heater: %s\n", Data.heater ? "ON" : "OFF");
+  Serial.printf(" Heater: %s", Data.heater ? "ON" : "OFF");
+  Serial.printf(" HeaterOverride: %s\n", heaterOverride ? "ON" : "OFF");
+
   SendDataToServer();
 
 }

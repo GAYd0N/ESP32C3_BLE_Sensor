@@ -20,7 +20,7 @@
 // 最大子节点数量
 #define MAX_SLAVES 3
 #define IS_SLAVE 1
-// #define IS_MASTER 1
+#define IS_MASTER 1
 
 struct SensorData {
   float temperature;
@@ -31,7 +31,9 @@ struct SensorData {
 
 struct CommandData {
   float tempThreshold = 25.0;
-  bool heater = false;
+  bool heaterOverride = false;
 };
+
+void SendCommandJson();
 
 #endif

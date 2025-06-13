@@ -33,12 +33,13 @@ class MyServerCallbacks: public BLEServerCallbacks {
           return;
         }
 
-        for (auto client : clients) {
+        for (auto &client : clients) {
           if (client.connected) {
             continue;
           }
           client.connId = connId;
           client.connected = true;
+          SendCommandJson();
           break;
         }
         connectedDevices++;
@@ -52,7 +53,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
     void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
         // 从列表中移除断开连接的客户端
-        for (auto client : clients) {
+        for (auto &client : clients) {
           if (client.connected && client.connId == param->connect.conn_id) {
             memset(&client, 0, sizeof(ClientDevice));
             break;
@@ -82,7 +83,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       Serial.printf("DATA: %S\t", jsonStr.c_str());
       Serial.printf("CONN_ID: %d\t", connId);
       Serial.printf("length: %d\n", length);
-      
+
       jsonStr.concat(pData, length);
 
       if(jsonStr.endsWith("\n")) {
@@ -93,12 +94,10 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         return;
       }
 
-
-
       JsonDocument jsonDoc;
       DeserializationError error = deserializeJson(jsonDoc, jsonStr);
 
-      for (auto client : clients) {
+      for (auto &client : clients) {
           if (client.connected && client.connId == connId) {
               DeserializationError error = deserializeJson(client.receivedJson, jsonStr);
               if (error) {
@@ -138,6 +137,8 @@ void sendLargeData(BLECharacteristic* pChar, const std::string& data) {
     pChar->notify();
     delay(10); // 给接收方处理时间
   }
+  pChar->setValue("\n");
+  pChar->notify();
 }
 
 void notifyAllClients(JsonDocument& jsonDoc) {
@@ -153,7 +154,6 @@ void notifyAllClients(JsonDocument& jsonDoc) {
     }
     else 
     {
-      jsonStr += "\n";
       sendLargeData(pTxCharacteristic, jsonStr);
     }
 }
@@ -162,7 +162,7 @@ void SendCommandJson() {
   JsonDocument jsonDoc;
 
   jsonDoc["tempThreshold"] = CData.tempThreshold;
-  jsonDoc["heater"] = CData.heater;
+  jsonDoc["heaterOverride"] = CData.heaterOverride;
   
   notifyAllClients(jsonDoc);
 }
@@ -199,23 +199,27 @@ void handleSerialCommands() {
     else if (command == "GET_THRESHOLD") {
       Serial.printf("当前温度阈值: %.1f°C\n", CData.tempThreshold);
     } 
-    else if (command == "START_HEATER") {
-      CData.heater = true;
+    else if (command == "HEATER_START") {
+      CData.heaterOverride = true;
       SendCommandJson();
-      Serial.println("开启加热器");
+      Serial.println("固定开启加热器");
     }
-    else if (command == "STOP_HEATER") {
-      CData.heater = false;
+    else if (command == "HEATER_STOP") {
+      CData.heaterOverride = true;
       SendCommandJson();
-      Serial.println("关闭加热器");
+      Serial.println("固定关闭加热器");
+    }
+    else if (command == "HEATER_AUTO") {
+      CData.heaterOverride = false;
+      SendCommandJson();
+      Serial.println("加热器自动模式");
     }
     else if (command == "STATUS") {
-      for (auto client : clients) {
+      for (auto &client : clients) {
         Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f%, 阈值: %.1f, 加热: %s\n",
         client.connId, client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, client.Data.heater ? "开启" : "关闭");
       }
-      Serial.printf("温度平均值: , 阈值: %.1f\n", CData.tempThreshold);
-
+      Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride);
     }
     else if (command == "HELP") {
       Serial.println("可用命令:");
@@ -270,16 +274,14 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t lastSendTime = 0;
+  // static uint32_t lastSendTime = 0;
+  // uint32_t msTime = millis();
+  // if (msTime - lastSendTime > 2000) {
+  //   lastSendTime = msTime;
+  //   Serial.printf("%d, Test\n",msTime);
+  // }
 
   handleSerialCommands();
-
-  uint32_t msTime = millis();
-  if (msTime - lastSendTime > 2000) {
-    lastSendTime = msTime;
-    Serial.printf("%d, Test\n",msTime);
-  }
-
   delay(100);
 }
 
