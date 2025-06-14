@@ -1,6 +1,6 @@
 #include "common_defs.h"
-#ifdef IS_SLAVE
-#include <c.h>
+#ifdef IS_CLIENT
+// #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -9,7 +9,7 @@
 
 #define DHTPIN 10
 #define DHTTYPE DHT22
-#define LED 0
+#define LED 8
 
 DHT DHTSensor(DHTPIN, DHTTYPE);
 
@@ -36,14 +36,6 @@ class MyClientCallback : public BLEClientCallbacks {
   }
 };
 
-void setHeaterStatus(bool status) {
-  if (status != Data.heater) {
-    Data.heater = status;
-    digitalWrite(LED, (byte)Data.heater);
-  }
-  Serial.printf("已%s加热器\n", status ? "启动" : "关闭");
-}
-
 void receiveDataChunks(uint8_t *pData, size_t length) {
   static String jsonStr;
   if (pData == nullptr)
@@ -51,7 +43,7 @@ void receiveDataChunks(uint8_t *pData, size_t length) {
 
   jsonStr.concat(pData, length);
 
-  // 检查是否收到完整数据（需要应用层协议确定结束）
+  // 检查是否收到完整数据
   if(jsonStr.endsWith("\n")) {
     Serial.println("完整数据接收完成:");
     Serial.println(jsonStr.c_str());
@@ -116,6 +108,7 @@ void sendLargeData(BLERemoteCharacteristic* pChar, const std::string& data) {
 
 
 void connectToServer() {
+    // 扫描回调时直接连接不靠谱
     pClient->connect(pServerAddress);
     Serial.printf("%d, 连接设备中, %s\n", millis(), pServerAddress.toString().c_str());
     delay(500);
@@ -178,12 +171,20 @@ void SendDataToServer() {
   }
 }
 
+void setHeaterStatus(bool status) {
+  if (Data.heater != status) {
+    Data.heater = status;
+  }
+  digitalWrite(LED, status ? LOW : HIGH);
+  Serial.printf("已%s加热器\n", status ? "启动" : "关闭");
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("子节点启动...");
 
-  pinMode(0, OUTPUT);
-
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, HIGH);
   // 设备名称带序号区分
   deviceName = CLIENT_DEVICE_PREFIX + String(ESP.getEfuseMac() & 0xFFFF, HEX);
 
@@ -203,13 +204,13 @@ void setup() {
   DHTSensor.begin();
 }
 
-
 void loop() {
-  static uint32_t lastSendTime = 0;
+  static uint32_t lastTime = 0;
   uint32_t msTime = millis();
-  if (msTime - lastSendTime > 2000) {
-    lastSendTime = msTime;
+  if (msTime - lastTime > 2000) {
+    lastTime = msTime;
     // Serial.printf("%d, Test\n",msTime);
+    // 每两秒检查连接状态
     if (!pClient->isConnected())
     {
       delay(5);
@@ -219,12 +220,7 @@ void loop() {
       Serial.printf("%d, 未连接服务器...\n", msTime);
     }
   }
-  // if (!deviceConnected && !oldDeviceConnected) {
-  //     delay(500); // 给BLE栈时间完成清理
-  //     // BLEDevice::getScan()->start(30);
-  //     oldDeviceConnected = deviceConnected;
-  // }
-
+  // 约两秒读取一次传感器
   delay(1800);
 
   float t = DHTSensor.readTemperature();
@@ -237,10 +233,10 @@ void loop() {
   }
   Data.humidity = h;
   Data.temperature = t;
-  if (!heaterOverride && t != -1) {
-    setHeaterStatus(Data.tempThreshold > t);
+  if (!heaterOverride && t > -1.0f) {
+    setHeaterStatus((Data.tempThreshold > t));
   }
-  else {
+  else if (heaterOverride) {
     setHeaterStatus(Data.heater);
   }
   Serial.print(F("Humidity: "));

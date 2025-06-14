@@ -1,5 +1,5 @@
 #include "common_defs.h"
-#ifdef IS_MASTER
+#ifdef IS_SERVER
 // #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BLEDevice.h>
@@ -15,20 +15,66 @@ struct ClientDevice {
   SensorData Data;
   String jsonStr;
 };
+
 BLECharacteristic *pTxCharacteristic;
 BLECharacteristic *pRxCharacteristic;
 BLEAdvertising *pAdvertising;
 BLEServer *pServer;
 BLEService *pService;
+
 ClientDevice Clients[3];
 CommandData CData;
 uint32_t connectedDevices = 0;
+
+void sendLargeData(BLECharacteristic* pChar, const std::string& data) {
+  const size_t chunkSize = DEFAULT_MTU;
+  size_t length = data.length();
+  
+  for(size_t i = 0; i < length; i += chunkSize) {
+    size_t end = (i + chunkSize > length) ? length : i + chunkSize;
+    std::string chunk = data.substr(i, end - i);
+    pChar->setValue(chunk);
+    pChar->notify();
+    delay(10); // 给接收方处理时间
+  }
+  pChar->setValue("\n");
+  pChar->notify();
+}
+
+void notifyAllClients(JsonDocument& jsonDoc) {
+  static bool isRunning = false;
+  if (!connectedDevices || isRunning)
+    return;
+  isRunning = true;
+  std::string jsonStr;
+  serializeJson(jsonDoc, jsonStr);
+  if (jsonStr.length() < DEFAULT_MTU)
+  {
+    pTxCharacteristic->setValue(jsonStr + "\n");
+    pTxCharacteristic->notify();
+    Serial.printf("Sent JSON: %s\n", jsonStr.c_str());
+  }
+  else 
+  {
+    sendLargeData(pTxCharacteristic, jsonStr);
+  }
+  isRunning = false;
+}
+
+void SendCommandJson() {
+  JsonDocument jsonDoc;
+
+  jsonDoc["tempThreshold"] = CData.tempThreshold;
+  jsonDoc["heaterOverride"] = CData.heaterOverride;
+  jsonDoc["heater"] = CData.heater;
+  notifyAllClients(jsonDoc);
+}
 
 // 服务器回调类
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
         uint16_t connId = param->connect.conn_id;
-        if (connectedDevices >= MAX_SLAVES || connId >= MAX_SLAVES) {
+        if (connectedDevices >= MAX_CLIENTS || connId >= MAX_CLIENTS) {
           pServer->disconnect(connId);
           return;
         }
@@ -75,7 +121,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       uint16_t connId = param->connect.conn_id;
       uint8_t* pData = param->write.value;
       uint16_t length = param->write.len;
-      if (!pData || !length || connId >= MAX_SLAVES)
+      if (!pData || !length || connId >= MAX_CLIENTS)
         return;
 
       // Serial.printf("DATA: %S\t", String(pData, length));
@@ -115,50 +161,6 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       }
     }
 };
-
-void sendLargeData(BLECharacteristic* pChar, const std::string& data) {
-  const size_t chunkSize = DEFAULT_MTU;
-  size_t length = data.length();
-  
-  for(size_t i = 0; i < length; i += chunkSize) {
-    size_t end = (i + chunkSize > length) ? length : i + chunkSize;
-    std::string chunk = data.substr(i, end - i);
-    pChar->setValue(chunk);
-    pChar->notify();
-    delay(10); // 给接收方处理时间
-  }
-  pChar->setValue("\n");
-  pChar->notify();
-}
-
-void notifyAllClients(JsonDocument& jsonDoc) {
-  static bool isRunning = false;
-  if (!connectedDevices || isRunning)
-    return;
-  isRunning = true;
-  std::string jsonStr;
-  serializeJson(jsonDoc, jsonStr);
-  if (jsonStr.length() < DEFAULT_MTU)
-  {
-    pTxCharacteristic->setValue(jsonStr + "\n");
-    pTxCharacteristic->notify();
-    Serial.printf("Sent JSON: %s\n", jsonStr.c_str());
-  }
-  else 
-  {
-    sendLargeData(pTxCharacteristic, jsonStr);
-  }
-  isRunning = false;
-}
-
-void SendCommandJson() {
-  JsonDocument jsonDoc;
-
-  jsonDoc["tempThreshold"] = CData.tempThreshold;
-  jsonDoc["heaterOverride"] = CData.heaterOverride;
-  jsonDoc["heater"] = CData.heater;
-  notifyAllClients(jsonDoc);
-}
 
 void ShowStatus() {
   for (auto &it : Clients) {
