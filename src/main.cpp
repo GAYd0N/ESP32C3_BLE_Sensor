@@ -10,11 +10,11 @@
 
 // 已连接的子节点结构体
 struct ClientDevice {
-  uint16_t connId = 0;
-  bool connected = false;
+  uint16_t connId;
+  bool connected;
   SensorData Data;
-  DynamicJsonDocument receivedJson{512};
-  char receivedStr[512];
+  JsonDocument receivedJson;
+  String jsonStr;
 };
 BLECharacteristic *pTxCharacteristic;
 BLECharacteristic *pRxCharacteristic;
@@ -58,7 +58,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
           if (client.connected && client.connId == param->connect.conn_id) {
             client.connected = false;
             client.connId = 0;
-            memset(client.receivedStr, 0, sizeof(client.receivedStr));
+            client.jsonStr.clear();
             client.Data.heater = false;
             client.Data.humidity = 0;
             client.Data.temperature = 0;
@@ -76,10 +76,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
         Serial.println("重启广播");
     }
 };
-bool endsWithNL(const char* str) {
-    unsigned int len = strlen(str);
-    return (len > 0) && (str[len - 1] == '\n');
-}
+
 // 接收数据回调类
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t* param) {
@@ -95,15 +92,13 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 
       for (auto &client : clients) {
         if (client.connected && client.connId == connId) {
-          size_t remainingSpace = sizeof(client.receivedStr) - strlen(client.receivedStr) - 1;
-          strncat(client.receivedStr, (char*)pData, remainingSpace);
-          if(endsWithNL(client.receivedStr)) {
+          client.jsonStr.concat(pData, length);
+          if(client.jsonStr.endsWith("\n")) {
             Serial.println("完整数据接收完成:");
-            // Serial.println(client.receivedStr.c_str());
-            String jsonStr(client.receivedStr);
-            if(!jsonStr.startsWith("{") || !jsonStr.endsWith("}\n")) {
+            // Serial.println(client.jsonStr.c_str());
+            if(!client.jsonStr.startsWith("{") || !client.jsonStr.endsWith("}\n")) {
               Serial.println("错误: 数据格式不符合JSON要求");
-              memset(client.receivedStr, 0, sizeof(client.receivedStr));
+              client.jsonStr.clear();
               return;
             }
           }
@@ -120,7 +115,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 
       for (auto &client : clients) {
           if (client.connected && client.connId == connId) {
-              DeserializationError error = deserializeJson(client.receivedJson, client.receivedStr);
+              DeserializationError error = deserializeJson(client.receivedJson, client.jsonStr);
               if (error) {
                   Serial.printf("JSON 解析失败: %s\n", error.c_str());
               } else {
@@ -130,9 +125,10 @@ class MyCallbacks: public BLECharacteristicCallbacks {
                   client.Data.humidity = client.receivedJson["humidity"];
                   client.Data.tempThreshold = client.receivedJson["tempThreshold"];
                   client.Data.heater = client.receivedJson["heater"];
-                  Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, HEATER: %d\n", 
-                    name.c_str(), client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, (client.Data.heater ? 1 : 0));
-                  memset(client.receivedStr, 0, sizeof(client.receivedStr));
+                  Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, HEATER: %d, connId: %d\n", 
+                    name.c_str(), client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, client.Data.heater ? 1 : 0, connId);
+                  client.jsonStr.clear();
+                  client.receivedJson.clear();
               }
               break;
           }
@@ -234,19 +230,19 @@ void handleSerialCommands() {
       Serial.println("加热器自动模式");
     }
     else if (command == "STATUS") {
-      for (size_t i = 0; i < MAX_SLAVES; i++) {
-        if (!clients[i].connected)
+      for (auto &client : clients) {
+        if (!clients->connected)
           continue;
         Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f%, 阈值: %.1f, 加热: %s\n",
-        clients[i].connId, clients[i].Data.temperature, clients[i].Data.humidity, clients[i].Data.tempThreshold, clients[i].Data.heater ? "开启" : "关闭");
+        clients->connId, clients->Data.temperature, clients->Data.humidity, clients->Data.tempThreshold, clients->Data.heater ? "开启" : "关闭");
       }
-      Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride);
+      Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride ? "OFF" : "ON");
     }
     else if (command == "HELP") {
       Serial.println("可用命令:");
       Serial.println("SET_THRESHOLD XX.X - 设置温度阈值(0-50°C)");
       Serial.println("GET_THRESHOLD - 获取当前温度阈值");
-      Serial.println("GET_STATUS - 获取当前系统状态");
+      Serial.println("STATUS - 获取当前系统状态");
       Serial.println("START_HEATER - 开启加热器");
       Serial.println("STOP_HEATER - 关闭加热器");
       Serial.println("HELP - 显示帮助信息");
@@ -290,9 +286,6 @@ void setup() {
   pAdvertising->setMaxInterval(0x40);
   pAdvertising->setMinPreferred(0x20);
   
-  for (auto &client : clients) {
-    client.connected = false;
-  }
   BLEDevice::startAdvertising();
   Serial.println("等待客户端连接...");
 }

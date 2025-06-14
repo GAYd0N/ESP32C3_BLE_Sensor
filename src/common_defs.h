@@ -25,12 +25,12 @@
 struct SensorData {
   float temperature;
   float humidity;
-  float tempThreshold = 25.0;
+  float tempThreshold;
   bool heater;
 };
 
 struct CommandData {
-  float tempThreshold = 25.0;
+  float tempThreshold;
   bool heaterOverride = false;
   bool heater = false;
 };
