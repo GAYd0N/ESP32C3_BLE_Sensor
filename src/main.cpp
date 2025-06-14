@@ -13,7 +13,6 @@ struct ClientDevice {
   uint16_t connId;
   bool connected;
   SensorData Data;
-  JsonDocument receivedJson;
   String jsonStr;
 };
 BLECharacteristic *pTxCharacteristic;
@@ -21,7 +20,7 @@ BLECharacteristic *pRxCharacteristic;
 BLEAdvertising *pAdvertising;
 BLEServer *pServer;
 BLEService *pService;
-ClientDevice clients[3];
+ClientDevice Clients[3];
 CommandData CData;
 uint32_t connectedDevices = 0;
 
@@ -29,46 +28,39 @@ uint32_t connectedDevices = 0;
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
         uint16_t connId = param->connect.conn_id;
-        if (connectedDevices >= MAX_SLAVES) {
+        if (connectedDevices >= MAX_SLAVES || connId >= MAX_SLAVES) {
           pServer->disconnect(connId);
           return;
         }
 
-        for (auto &client : clients) {
-          if (client.connected) {
-            continue;
-          }
-          client.connId = connId;
-          client.connected = true;
-          SendCommandJson();
-          break;
-        }
+        Clients[connId].connId = connId;
+        Clients[connId].connected = true;
+        SendCommandJson();
+
         connectedDevices++;
-        Serial.printf("客户端已连接, ID: ");
+        Serial.printf("客户端已连接, connId: ");
         Serial.println(connId);
         Serial.print("当前连接客户端数量: ");
-        Serial.println(connectedDevices);
+        Serial.println(connectedDevices); 
         BLEDevice::startAdvertising();
         Serial.println("重启广播");
-    };
+    }
 
     void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
-        // 从列表中移除断开连接的客户端
-        for (auto &client : clients) {
-          if (client.connected && client.connId == param->connect.conn_id) {
-            client.connected = false;
-            client.connId = 0;
-            client.jsonStr.clear();
-            client.Data.heater = false;
-            client.Data.humidity = 0;
-            client.Data.temperature = 0;
-            client.Data.tempThreshold = 25.0;
-            break;
-          }
+        uint16_t connId = param->connect.conn_id;
+        if (Clients[connId].connected && Clients[connId].connId == connId) {
+          Clients[connId].connected = false;
+          Clients[connId].connId = 0;
+          Clients[connId].jsonStr.clear();
+          Clients[connId].Data.heater = false;
+          Clients[connId].Data.humidity = 0;
+          Clients[connId].Data.temperature = 0;
+          Clients[connId].Data.tempThreshold = 25.0;
         }
+        
         connectedDevices--;
         Serial.print("客户端已断开: ");
-        Serial.println(param->connect.conn_id);
+        Serial.println(connId);
         Serial.print("剩余连接客户端数量: ");
         Serial.println(connectedDevices);
 
@@ -83,55 +75,43 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       uint16_t connId = param->connect.conn_id;
       uint8_t* pData = param->write.value;
       uint16_t length = param->write.len;
-      if (!pData || !length)
+      if (!pData || !length || connId >= MAX_SLAVES)
         return;
 
       // Serial.printf("DATA: %S\t", String(pData, length));
       // Serial.printf("CONN_ID: %d\t", connId);
       // Serial.printf("length: %d\n", length);
 
-      for (auto &client : clients) {
-        if (client.connected && client.connId == connId) {
-          client.jsonStr.concat(pData, length);
-          if(client.jsonStr.endsWith("\n")) {
-            Serial.println("完整数据接收完成:");
-            // Serial.println(client.jsonStr.c_str());
-            if(!client.jsonStr.startsWith("{") || !client.jsonStr.endsWith("}\n")) {
-              Serial.println("错误: 数据格式不符合JSON要求");
-              client.jsonStr.clear();
-              return;
-            }
-          }
-          else {
+      if (Clients[connId].connected && Clients[connId].connId == connId) {
+        Clients[connId].jsonStr.concat(pData, length);
+        if(Clients[connId].jsonStr.endsWith("\n")) {
+          // Serial.println("完整数据接收完成:");
+          // Serial.println(client.jsonStr.c_str());
+          if(!Clients[connId].jsonStr.startsWith("{") || !Clients[connId].jsonStr.endsWith("}\n")) {
+            Serial.println("错误: 数据格式不符合JSON要求");
+            Clients[connId].jsonStr.clear();
             return;
           }
         }
+        else {
+          return;
+        }
       }
 
-
-
       JsonDocument jsonDoc;
-      DeserializationError error;
-
-      for (auto &client : clients) {
-          if (client.connected && client.connId == connId) {
-              DeserializationError error = deserializeJson(client.receivedJson, client.jsonStr);
-              if (error) {
-                  Serial.printf("JSON 解析失败: %s\n", error.c_str());
-              } else {
-                  // Serial.printf("Received JSON from %d: %s\n", connId, client.receivedStr.c_str());
-                  String name = client.receivedJson["name"];
-                  client.Data.temperature = client.receivedJson["temperature"];
-                  client.Data.humidity = client.receivedJson["humidity"];
-                  client.Data.tempThreshold = client.receivedJson["tempThreshold"];
-                  client.Data.heater = client.receivedJson["heater"];
-                  Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, HEATER: %d, connId: %d\n", 
-                    name.c_str(), client.Data.temperature, client.Data.humidity, client.Data.tempThreshold, client.Data.heater ? 1 : 0, connId);
-                  client.jsonStr.clear();
-                  client.receivedJson.clear();
-              }
-              break;
-          }
+      DeserializationError error = deserializeJson(jsonDoc, Clients[connId].jsonStr);
+      if (error) {
+          Serial.printf("JSON 解析失败: %s\n", error.c_str());
+      } else {
+          // Serial.printf("Received JSON from %d: %s\n", connId, it.receivedStr.c_str());
+          String name = jsonDoc["name"];
+          Clients[connId].Data.temperature = jsonDoc["temperature"];
+          Clients[connId].Data.humidity = jsonDoc["humidity"];
+          Clients[connId].Data.tempThreshold = jsonDoc["tempThreshold"];
+          Clients[connId].Data.heater = jsonDoc["heater"];
+          // Serial.printf("%s: T: %.2f, H: %.2f, TH: %.2f, HEATER: %d, connId: %d\n", 
+          //   name.c_str(), Clients[connId].Data.temperature, Clients[connId].Data.humidity, Clients[connId].Data.tempThreshold, Clients[connId].Data.heater ? 1 : 0, connId);
+          Clients[connId].jsonStr.clear();
       }
     }
 };
@@ -178,6 +158,16 @@ void SendCommandJson() {
   jsonDoc["heaterOverride"] = CData.heaterOverride;
   jsonDoc["heater"] = CData.heater;
   notifyAllClients(jsonDoc);
+}
+
+void ShowStatus() {
+  for (auto &it : Clients) {
+    if (!Clients->connected)
+      continue;
+    Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f, 阈值: %.1f, 加热: %s\n",
+    it.connId, it.Data.temperature, it.Data.humidity, it.Data.tempThreshold, it.Data.heater ? "开启" : "关闭");
+  }
+  Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride ? "OFF" : "ON");
 }
 
 void handleSerialCommands() {
@@ -230,13 +220,7 @@ void handleSerialCommands() {
       Serial.println("加热器自动模式");
     }
     else if (command == "STATUS") {
-      for (auto &client : clients) {
-        if (!clients->connected)
-          continue;
-        Serial.printf("当前状态 - 节点%d: 温度: %.1f°C, 湿度: %.1f%, 阈值: %.1f, 加热: %s\n",
-        clients->connId, clients->Data.temperature, clients->Data.humidity, clients->Data.tempThreshold, clients->Data.heater ? "开启" : "关闭");
-      }
-      Serial.printf("温度阈值: %.1f, 加热器自动模式: %s\n", CData.tempThreshold, CData.heaterOverride ? "OFF" : "ON");
+      ShowStatus();
     }
     else if (command == "HELP") {
       Serial.println("可用命令:");
@@ -259,7 +243,7 @@ void setup() {
   // 创建BLE服务器
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
-
+  
   // 创建BLE服务
   pService = pServer->createService(SERVICE_UUID);
   // 创建用于发送的特征
@@ -291,13 +275,13 @@ void setup() {
 }
 
 void loop() {
-  // static uint32_t lastSendTime = 0;
-  // uint32_t msTime = millis();
-  // if (msTime - lastSendTime > 2000) {
-  //   lastSendTime = msTime;
-  //   Serial.printf("%d, Test\n",msTime);
-  // }
-
+  static uint32_t lastSendTime = 0;
+  uint32_t msTime = millis();
+  if (msTime - lastSendTime > 2000) {
+    lastSendTime = msTime;
+    // Serial.printf("%d, Test\n",msTime);
+    ShowStatus();
+  }
   handleSerialCommands();
   delay(100);
 }
