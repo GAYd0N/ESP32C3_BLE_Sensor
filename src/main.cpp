@@ -229,8 +229,8 @@ void handleSerialCommands() {
       Serial.println("SET_THRESHOLD XX.X - 设置温度阈值(0-50°C)");
       Serial.println("GET_THRESHOLD - 获取当前温度阈值");
       Serial.println("STATUS - 获取当前系统状态");
-      Serial.println("START_HEATER - 开启加热器");
-      Serial.println("STOP_HEATER - 关闭加热器");
+      Serial.println("HEATER_START - 开启加热器");
+      Serial.println("HEATER_STOP - 关闭加热器");
       Serial.println("HELP - 显示帮助信息");
     }
   }
