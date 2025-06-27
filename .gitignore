@@ -3,3 +3,5 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+kicad/esp32-c3/esp32-c3-backups
+kicad/esp32-c3/fp-info-cache
